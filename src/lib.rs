@@ -10,6 +10,9 @@
 //#![warn(missing_docs)] // TODO
 #![warn(rust_2018_idioms)]
 #![warn(rust_2021_compatibility)]
+#![warn(rust_2024_compatibility)]
+#![allow(tail_expr_drop_order)] // TODO: Remove after upgrading to Edition 2024
+#![allow(if_let_rescope)] // TODO: Remove after upgrading to Edition 2024
 #![warn(unreachable_pub)]
 #![warn(unsafe_code)]
 #![warn(unused)]
