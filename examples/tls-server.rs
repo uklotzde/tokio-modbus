@@ -1,86 +1,31 @@
 // SPDX-FileCopyrightText: Copyright (c) 2017-2025 slowtec GmbH <post@slowtec.de>
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// load_certs() and partially load_keys() functions were copied from an example of the tokio tls library, available at:
-// https://github.com/tokio-rs/tls/blob/master/tokio-rustls/examples/server/src/main.rs
-
 //! TCP server example
 
 use std::{
     collections::HashMap,
-    fs::File,
     future,
-    io::{self, BufReader},
+    io,
     net::SocketAddr,
     path::Path,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use pkcs8::der::Decode;
-use pki_types::{CertificateDer, PrivateKeyDer, ServerName};
-use rustls_pemfile::{certs, pkcs8_private_keys};
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerName};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_modbus::{prelude::*, server::tcp::Server};
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
-fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
-    certs(&mut BufReader::new(File::open(path)?)).collect()
+fn load_certs(path: &Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
+    CertificateDer::pem_file_iter(path)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
-fn load_keys(path: &Path, password: Option<&str>) -> io::Result<PrivateKeyDer<'static>> {
-    let expected_tag = match &password {
-        Some(_) => "ENCRYPTED PRIVATE KEY",
-        None => "PRIVATE KEY",
-    };
-
-    if expected_tag.eq("PRIVATE KEY") {
-        pkcs8_private_keys(&mut BufReader::new(File::open(path)?))
-            .next()
-            .unwrap()
-            .map(Into::into)
-    } else {
-        let content = std::fs::read(path)?;
-        let mut iter = pem::parse_many(content)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?
-            .into_iter()
-            .filter(|x| x.tag() == expected_tag)
-            .map(|x| x.contents().to_vec());
-
-        match iter.next() {
-            Some(key) => match password {
-                Some(password) => {
-                    let encrypted =
-                        pkcs8::EncryptedPrivateKeyInfo::from_der(&key).map_err(|err| {
-                            io::Error::new(io::ErrorKind::InvalidData, err.to_string())
-                        })?;
-                    let decrypted = encrypted.decrypt(password).map_err(|err| {
-                        io::Error::new(io::ErrorKind::InvalidData, err.to_string())
-                    })?;
-                    let key = decrypted.as_bytes().to_vec();
-                    match rustls_pemfile::read_one_from_slice(&key)
-                        .expect("cannot parse private key .pem file")
-                    {
-                        Some((rustls_pemfile::Item::Pkcs1Key(key), _keys)) => {
-                            io::Result::Ok(key.into())
-                        }
-                        Some((rustls_pemfile::Item::Pkcs8Key(key), _keys)) => {
-                            io::Result::Ok(key.into())
-                        }
-                        Some((rustls_pemfile::Item::Sec1Key(key), _keys)) => {
-                            io::Result::Ok(key.into())
-                        }
-                        _ => io::Result::Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "invalid key",
-                        )),
-                    }
-                }
-                None => io::Result::Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid key")),
-            },
-            None => io::Result::Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid key")),
-        }
-    }
+fn load_key(path: &Path) -> anyhow::Result<PrivateKeyDer<'static>> {
+    PrivateKeyDer::from_pem_file(path).map_err(Into::into)
 }
 
 struct ExampleService {
@@ -199,10 +144,10 @@ async fn server_context(socket_addr: SocketAddr) -> anyhow::Result<()> {
     let server = Server::new(listener);
 
     let on_connected = |stream, _socket_addr| async move {
-        let cert_path = Path::new("./pki/server.pem");
-        let key_path = Path::new("./pki/server.key");
-        let certs = load_certs(cert_path)?;
-        let key = load_keys(key_path, None)?;
+        let cert_path = Path::new("examples/pki/snakeoil.pem");
+        let key_path = Path::new("examples/pki/snakeoil.key");
+        let certs = load_certs(cert_path).unwrap();
+        let key = load_key(key_path).unwrap();
         let config = rustls::ServerConfig::builder()
             .with_no_client_auth()
             .with_single_cert(certs, key)
@@ -232,18 +177,15 @@ async fn client_context(socket_addr: SocketAddr) {
 
             println!("Connecting client...");
             let mut root_cert_store = rustls::RootCertStore::empty();
-            let ca_path = Path::new("./pki/ca.pem");
-            let mut pem = BufReader::new(File::open(ca_path).unwrap());
-            let certs = rustls_pemfile::certs(&mut pem)
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap();
-            root_cert_store.add_parsable_certificates(certs);
+            let ca_cert_path = Path::new("examples/pki/cacert.pem");
+            let root_certs = load_certs(ca_cert_path).unwrap();
+            root_cert_store.add_parsable_certificates(root_certs);
 
             let domain = "localhost";
-            let cert_path = Path::new("./pki/client.pem");
-            let key_path = Path::new("./pki/client.key");
+            let cert_path = Path::new("examples/pki/snakeoil.pem");
+            let key_path = Path::new("examples/pki/snakeoil.key");
             let certs = load_certs(cert_path).unwrap();
-            let key = load_keys(key_path, None).unwrap();
+            let key = load_key(key_path).unwrap();
 
             let config = rustls::ClientConfig::builder()
                 .with_root_certificates(root_cert_store)
@@ -256,7 +198,7 @@ async fn client_context(socket_addr: SocketAddr) {
             stream.set_nodelay(true).unwrap();
 
             let domain = ServerName::try_from(domain)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid dnsname"))
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid DNS name"))
                 .unwrap();
 
             let transport = connector.connect(domain, stream).await.unwrap();

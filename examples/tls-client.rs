@@ -1,82 +1,23 @@
 // SPDX-FileCopyrightText: Copyright (c) 2017-2025 slowtec GmbH <post@slowtec.de>
 // SPDX-License-Identifier: MIT OR Apache-2.0
 
-// load_certs() and partially load_keys() functions were copied from an example of the tokio tls library, available at:
-// https://github.com/tokio-rs/tls/blob/master/tokio-rustls/examples/server/src/main.rs
-
 //! Asynchronous TLS client example
+
 use tokio::net::TcpStream;
 
-use std::{
-    fs::File,
-    io::{self, BufReader},
-    net::SocketAddr,
-    path::Path,
-    sync::Arc,
-};
+use std::{io, net::SocketAddr, path::Path, sync::Arc};
 
-use pkcs8::der::Decode;
-use pki_types::{CertificateDer, PrivateKeyDer, ServerName};
-use rustls_pemfile::{certs, pkcs8_private_keys};
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, ServerName};
 use tokio_rustls::TlsConnector;
 
-fn load_certs(path: &Path) -> io::Result<Vec<CertificateDer<'static>>> {
-    certs(&mut BufReader::new(File::open(path)?)).collect()
+fn load_certs(path: &Path) -> anyhow::Result<Vec<CertificateDer<'static>>> {
+    CertificateDer::pem_file_iter(path)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(Into::into)
 }
 
-fn load_keys(path: &Path, password: Option<&str>) -> io::Result<PrivateKeyDer<'static>> {
-    let expected_tag = match &password {
-        Some(_) => "ENCRYPTED PRIVATE KEY",
-        None => "PRIVATE KEY",
-    };
-
-    if expected_tag.eq("PRIVATE KEY") {
-        pkcs8_private_keys(&mut BufReader::new(File::open(path)?))
-            .next()
-            .unwrap()
-            .map(Into::into)
-    } else {
-        let content = std::fs::read(path)?;
-        let mut iter = pem::parse_many(content)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?
-            .into_iter()
-            .filter(|x| x.tag() == expected_tag)
-            .map(|x| x.contents().to_vec());
-
-        match iter.next() {
-            Some(key) => match password {
-                Some(password) => {
-                    let encrypted =
-                        pkcs8::EncryptedPrivateKeyInfo::from_der(&key).map_err(|err| {
-                            io::Error::new(io::ErrorKind::InvalidData, err.to_string())
-                        })?;
-                    let decrypted = encrypted.decrypt(password).map_err(|err| {
-                        io::Error::new(io::ErrorKind::InvalidData, err.to_string())
-                    })?;
-                    let key = decrypted.as_bytes().to_vec();
-                    match rustls_pemfile::read_one_from_slice(&key)
-                        .expect("cannot parse private key .pem file")
-                    {
-                        Some((rustls_pemfile::Item::Pkcs1Key(key), _keys)) => {
-                            io::Result::Ok(key.into())
-                        }
-                        Some((rustls_pemfile::Item::Pkcs8Key(key), _keys)) => {
-                            io::Result::Ok(key.into())
-                        }
-                        Some((rustls_pemfile::Item::Sec1Key(key), _keys)) => {
-                            io::Result::Ok(key.into())
-                        }
-                        _ => io::Result::Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            "invalid key",
-                        )),
-                    }
-                }
-                None => io::Result::Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid key")),
-            },
-            None => io::Result::Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid key")),
-        }
-    }
+fn load_key(path: &Path) -> anyhow::Result<PrivateKeyDer<'static>> {
+    PrivateKeyDer::from_pem_file(path).map_err(Into::into)
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -86,16 +27,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let socket_addr: SocketAddr = "127.0.0.1:8802".parse()?;
 
     let mut root_cert_store = tokio_rustls::rustls::RootCertStore::empty();
-    let ca_path = Path::new("./pki/ca.pem");
-    let mut pem = BufReader::new(File::open(ca_path)?);
-    let certs = rustls_pemfile::certs(&mut pem).collect::<Result<Vec<_>, _>>()?;
-    root_cert_store.add_parsable_certificates(certs);
+    let ca_cert_path = Path::new("examples/pki/cacert.pem");
+    let root_certs = load_certs(ca_cert_path)?;
+    root_cert_store.add_parsable_certificates(root_certs);
 
     let domain = "localhost";
-    let cert_path = Path::new("./pki/client.pem");
-    let key_path = Path::new("./pki/client.key");
+    let cert_path = Path::new("examples/pki/snakeoil.pem");
+    let key_path = Path::new("examples/pki/snakeoil.key");
     let certs = load_certs(cert_path)?;
-    let key = load_keys(key_path, None)?;
+    let key = load_key(key_path)?;
 
     let config = tokio_rustls::rustls::ClientConfig::builder()
         .with_root_certificates(root_cert_store)
